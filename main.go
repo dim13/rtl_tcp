@@ -107,7 +107,13 @@ func (s *server) command(c command, arg uint32) error {
 		return s.dev.SetAGC(arg != 0)
 	case cmdBiasTee:
 		return s.dev.SetBiasTee(arg != 0)
-	case cmdTestMode, cmdDirectSampling, cmdOffsetTuning:
+	case cmdDirectSampling:
+		// Blog V4 reaches HF through its upconverter instead.
+		if arg == 0 || s.dev.BlogV4() {
+			return nil
+		}
+		return errors.ErrUnsupported
+	case cmdTestMode, cmdOffsetTuning:
 		// Off is the power-on state; clients send it on connect.
 		if arg == 0 {
 			return nil

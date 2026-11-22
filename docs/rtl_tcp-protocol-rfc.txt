@@ -433,7 +433,9 @@ Table of Contents
       bandwidth), 0x03, 0x04, 0x05 (retuning afterwards), 0x08, 0x0d,
       and 0x0e (GPIO 0).  Commands 0x07, 0x09, and 0x0a are accepted
       silently with parameter 0 (the power-on state) and otherwise
-      logged and ignored, as are all remaining commands.
+      logged and ignored, as are all remaining commands.  On a Blog V4,
+      0x09 is accepted silently with any parameter, since that board
+      reaches HF through its upconverter.
 
    o  Buffers 64 USB transfers of 262144 bytes (about 3.4 s at
       2.4 MS/s) between the device and the socket, and discards new
