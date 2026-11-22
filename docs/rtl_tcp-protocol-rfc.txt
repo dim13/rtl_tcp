@@ -431,8 +431,10 @@ Table of Contents
       Section 6.2.
 
    o  Implements commands 0x01, 0x02 (also setting the IF filter
-      bandwidth), 0x03, 0x04, 0x05 (retuning afterwards), and 0x0d.
-      All other commands are consumed, logged, and ignored.
+      bandwidth), 0x03, 0x04, 0x05 (retuning afterwards), 0x08, and
+      0x0d.  Commands 0x07, 0x09, 0x0a, and 0x0e are accepted
+      silently with parameter 0 (the power-on state) and otherwise
+      logged and ignored, as are all remaining commands.
 
    o  Buffers 64 USB transfers of 262144 bytes (about 3.4 s at
       2.4 MS/s) between the device and the socket, and discards new
