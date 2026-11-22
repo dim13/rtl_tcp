@@ -425,9 +425,8 @@ Table of Contents
    o  Listens on 127.0.0.1:1234 by default and serves one client at
       a time; further clients wait in the listen backlog.
 
-   o  Always reports Tuner Type 5 (R820T) with Gain Step Count 29,
-      including on R828D hardware, since [R82XX] does not expose the
-      detected tuner type.  Both types share the gain table in
+   o  Reports the detected tuner, Tuner Type 5 (R820T) or 6 (R828D),
+      with Gain Step Count 29.  Both types share the gain table in
       Section 6.2.
 
    o  Implements commands 0x01, 0x02 (also setting the IF filter
