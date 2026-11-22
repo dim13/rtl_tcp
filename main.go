@@ -104,7 +104,9 @@ func (s *server) command(c command, arg uint32) error {
 		return s.dev.SetGain(tuner.GainSteps[arg])
 	case cmdAGCMode:
 		return s.dev.SetAGC(arg != 0)
-	case cmdTestMode, cmdDirectSampling, cmdOffsetTuning, cmdBiasTee:
+	case cmdBiasTee:
+		return s.dev.SetBiasTee(arg != 0)
+	case cmdTestMode, cmdDirectSampling, cmdOffsetTuning:
 		// Off is the power-on state; clients send it on connect.
 		if arg == 0 {
 			return nil

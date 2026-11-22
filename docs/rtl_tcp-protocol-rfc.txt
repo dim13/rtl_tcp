@@ -431,8 +431,8 @@ Table of Contents
       Section 6.2.
 
    o  Implements commands 0x01, 0x02 (also setting the IF filter
-      bandwidth), 0x03, 0x04, 0x05 (retuning afterwards), 0x08, and
-      0x0d.  Commands 0x07, 0x09, 0x0a, and 0x0e are accepted
+      bandwidth), 0x03, 0x04, 0x05 (retuning afterwards), 0x08, 0x0d,
+      and 0x0e (GPIO 0).  Commands 0x07, 0x09, and 0x0a are accepted
       silently with parameter 0 (the power-on state) and otherwise
       logged and ignored, as are all remaining commands.
 
