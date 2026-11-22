@@ -35,15 +35,16 @@ var commandNames = [...]string{
 	cmdBiasTee:        "bias tee",
 }
 
+// librtlsdr tuner types reported in the header.
+var tunerTypes = map[tuner.Type]uint32{
+	tuner.R820T: 5,
+	tuner.R828D: 6,
+}
+
 const (
 	bufSize = 262_144 // 16 * 32 * 512
 	bufs    = 64      // ~3.4 s at 2.4 MS/s before samples are dropped
 )
-
-// librtlsdr tuner type reported in the header.
-// ponytail: r82xx.Device does not expose R820T vs R828D; both share
-// the gain table, which is all clients use this for.
-const tunerR820T = 5
 
 type command byte
 
@@ -124,7 +125,7 @@ func (s *server) serve(conn net.Conn) error {
 	}
 	hdr := make([]byte, 12)
 	copy(hdr, "RTL0")
-	binary.BigEndian.PutUint32(hdr[4:], tunerR820T)
+	binary.BigEndian.PutUint32(hdr[4:], tunerTypes[s.dev.Chip()])
 	binary.BigEndian.PutUint32(hdr[8:], uint32(len(tuner.GainSteps)))
 	if _, err := conn.Write(hdr); err != nil {
 		return err
