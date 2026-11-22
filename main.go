@@ -8,13 +8,32 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/dim13/r82xx"
 	"github.com/dim13/r82xx/tuner"
 )
+
+var commandNames = [...]string{
+	cmdFrequency:      "frequency",
+	cmdSampleRate:     "sample rate",
+	cmdGainMode:       "gain mode",
+	cmdGain:           "gain",
+	cmdFreqCorrection: "freq correction",
+	cmdIFGain:         "if gain",
+	cmdTestMode:       "test mode",
+	cmdAGCMode:        "agc mode",
+	cmdDirectSampling: "direct sampling",
+	cmdOffsetTuning:   "offset tuning",
+	cmdRTLXtal:        "rtl xtal",
+	cmdTunerXtal:      "tuner xtal",
+	cmdGainByIndex:    "gain by index",
+	cmdBiasTee:        "bias tee",
+}
 
 const (
 	bufSize = 262_144 // 16 * 32 * 512
@@ -46,6 +65,13 @@ const (
 	cmdGainByIndex            // index into gain table
 	cmdBiasTee                // 0/1
 )
+
+func (c command) String() string {
+	if int(c) < len(commandNames) && commandNames[c] != "" {
+		return commandNames[c]
+	}
+	return fmt.Sprintf("%#x", byte(c))
+}
 
 type server struct {
 	dev  *r82xx.Device
@@ -120,7 +146,7 @@ func (s *server) serve(conn net.Conn) error {
 			buf := make([]byte, bufSize)
 			n, err := s.dev.Read(buf)
 			if err != nil {
-				log.Println("read:", err)
+				slog.Error("read", "err", err)
 				conn.Close()
 				return
 			}
@@ -133,8 +159,8 @@ func (s *server) serve(conn net.Conn) error {
 			if d := time.Since(start); d >= time.Second {
 				if dropped > 0 {
 					// USB rate should be 2 bytes per sample.
-					log.Printf("client too slow: dropped %d buffers, USB %.2f MB/s",
-						dropped, float64(total)/d.Seconds()/1e6)
+					slog.Warn("client too slow", "dropped", dropped,
+						"usb", fmt.Sprintf("%.2f MB/s", float64(total)/d.Seconds()/1e6))
 				}
 				dropped, total, start = 0, 0, time.Now()
 			}
@@ -155,8 +181,9 @@ func (s *server) serve(conn net.Conn) error {
 			break
 		}
 		c, arg := command(cmd[0]), binary.BigEndian.Uint32(cmd[1:])
+		slog.Debug("command", "cmd", c, "arg", arg)
 		if err := s.command(c, arg); err != nil {
-			log.Printf("command %#x %d: %v", c, arg, err)
+			slog.Warn("command", "cmd", c, "arg", arg, "err", err)
 		}
 	}
 	close(done)
@@ -178,13 +205,23 @@ func setSampleRate(dev *r82xx.Device, hz uint32) error {
 
 func main() {
 	var (
-		addr = flag.String("a", "127.0.0.1:1234", "listen address")
-		freq = flag.Float64("f", 100e6, "frequency in Hz")
-		rate = flag.Uint("s", 2_048_000, "sample rate in Hz")
-		gain = flag.Float64("g", 0, "gain in dB, 0 for auto")
-		ppm  = flag.Int("P", 0, "frequency correction in ppm")
+		addr  = flag.String("a", "127.0.0.1:1234", "listen address")
+		freq  = flag.Float64("f", 100e6, "frequency in Hz")
+		rate  = flag.Uint("s", 2_048_000, "sample rate in Hz")
+		gain  = flag.Float64("g", 0, "gain in dB, 0 for auto")
+		ppm   = flag.Int("P", 0, "frequency correction in ppm")
+		debug = flag.Bool("d", false, "log received commands")
 	)
 	flag.Parse()
+
+	var level slog.Level
+	if *debug {
+		level = slog.LevelDebug
+	}
+	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(h))
+	// The log package now writes through slog; only log.Fatal uses it.
+	slog.SetLogLoggerLevel(slog.LevelError)
 
 	u, err := openUSB()
 	if err != nil {
@@ -221,7 +258,7 @@ func main() {
 	if err != nil {
 		log.Fatal("listen: ", err)
 	}
-	log.Println("listening on", l.Addr())
+	slog.Info("listening", "addr", l.Addr())
 	s := &server{dev: dev, freq: *freq}
 	// rtl_tcp serves one client at a time.
 	for {
@@ -229,10 +266,10 @@ func main() {
 		if err != nil {
 			log.Fatal("accept: ", err)
 		}
-		log.Println("client connected")
+		slog.Info("client connected")
 		if err := s.serve(conn); err != nil {
-			log.Println("serve:", err)
+			slog.Error("serve", "err", err)
 		}
-		log.Println("client disconnected")
+		slog.Info("client disconnected")
 	}
 }
