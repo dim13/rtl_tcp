@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/dim13/r82xx"
 	"github.com/dim13/r82xx/tuner"
@@ -108,6 +109,8 @@ func (s *server) serve(conn net.Conn) error {
 	// stalling the device FIFO.
 	wg.Go(func() {
 		defer close(samples)
+		var dropped, total int
+		start := time.Now()
 		for {
 			select {
 			case <-done:
@@ -124,7 +127,16 @@ func (s *server) serve(conn net.Conn) error {
 			select {
 			case samples <- buf[:n]:
 			default:
-				log.Println("client too slow, dropping samples")
+				dropped++
+			}
+			total += n
+			if d := time.Since(start); d >= time.Second {
+				if dropped > 0 {
+					// USB rate should be 2 bytes per sample.
+					log.Printf("client too slow: dropped %d buffers, USB %.2f MB/s",
+						dropped, float64(total)/d.Seconds()/1e6)
+				}
+				dropped, total, start = 0, 0, time.Now()
 			}
 		}
 	})
