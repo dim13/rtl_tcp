@@ -1,0 +1,506 @@
+Protocol Specification                                           rtl_tcp
+Informational                                              November 2026
+
+
+                 rtl_tcp I/Q Sample Streaming Protocol
+
+
+Status of This Memo
+
+   This document is an independently-authored protocol description.
+   It is NOT an IETF work product, has not been submitted to or
+   reviewed by the IETF, and carries no RFC number; the document
+   header format is used here only as an organizational convention.
+   It describes the de-facto wire protocol spoken by rtl_tcp servers
+   and the SDR client applications that connect to them, as observed
+   on the wire.  Distribution of this document is unlimited.
+
+Abstract
+
+   This document specifies rtl_tcp, a minimal TCP protocol for
+   streaming raw 8-bit I/Q samples from a USB software-defined-radio
+   (SDR) receiver to a network client, and for the client to control
+   the receiver (frequency, sample rate, gain, and related settings).
+   The protocol consists of a fixed 12-byte server greeting, an
+   unframed server-to-client sample stream, and fixed-size 5-byte
+   client-to-server commands.  There are no replies, acknowledgements,
+   or error reports.
+
+Table of Contents
+
+   1.  Introduction
+   2.  Requirements Language
+   3.  Terminology
+   4.  Transport
+   5.  Session Overview
+   6.  Server Greeting
+     6.1.  Tuner Type Values
+     6.2.  Gain Table
+   7.  Sample Stream
+     7.1.  Sample Format
+     7.2.  Flow Control and Sample Loss
+   8.  Client Commands
+     8.1.  Command Encoding
+     8.2.  Command Table
+     8.3.  Command Semantics
+   9.  Initial Device State
+   10. Implementation Status
+   11. Security Considerations
+   12. References
+     12.1.  Normative References
+     12.2.  Informative References
+   Author's Address
+
+
+1.  Introduction
+
+   An RTL2832U-based SDR receiver delivers a continuous stream of
+   complex baseband samples over USB.  rtl_tcp exposes that stream on
+   a TCP socket, so the receiver can be attached to one host while the
+   signal processing runs on another.
+
+   The protocol is deliberately small: the server announces which
+   tuner it drives and how many gain steps it offers, then sends
+   samples until the connection closes.  The client steers the
+   receiver by writing 5-byte commands at any time.  Because commands
+   are never answered, a client cannot learn whether a command took
+   effect, nor read back any setting.
+
+   The receiver hardware behind the commands is described in
+   [HWSPEC]; this document refers to it for value ranges and side
+   effects, and specifies only what crosses the network.
+
+
+2.  Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+
+3.  Terminology
+
+   Server
+      The process that owns the USB receiver and listens for TCP
+      connections.
+
+   Client
+      The process that connects to the server, consumes samples, and
+      issues commands.
+
+   I/Q pair
+      One complex sample: an in-phase (I) byte followed by a
+      quadrature (Q) byte.
+
+   uint32
+      An unsigned 32-bit integer in network byte order (big-endian).
+
+   int32
+      A signed 32-bit two's-complement integer in network byte order,
+      carried in the same 4 bytes as a uint32.
+
+   Tenths of dB
+      Gain unit used throughout: the value 496 means 49.6 dB.
+
+
+4.  Transport
+
+   rtl_tcp runs over a single TCP [RFC9293] connection.  The
+   conventional server port is 1234; there is no registered port.
+
+   A server serves at most one client at a time.  While a client is
+   connected, further connection attempts MAY be left pending in the
+   listen backlog until the current client disconnects; they MUST NOT
+   receive samples concurrently with it, since both would be steering
+   the same receiver.
+
+   Either side ends the session by closing the connection.  There is
+   no goodbye message.
+
+
+5.  Session Overview
+
+     Client                                             Server
+       |                                                    |
+       |  TCP connect  ---------------------------------->  |
+       |                                                    |
+       |  <------------------  greeting (12 bytes, sec. 6)  |
+       |  <------------------  I/Q samples (sec. 7) ......  |
+       |                                                    |
+       |  command (5 bytes, sec. 8)  -------------------->  |
+       |  <------------------  I/Q samples ...............  |
+       |  command  -------------------------------------->  |
+       |  <------------------  I/Q samples ...............  |
+       |                                                    |
+       |  TCP close  ------------------------------------>  |
+       |                                                    |
+
+                      Figure 1: Session Overview
+
+   The two directions are independent.  The server-to-client direction
+   carries the greeting and then samples only; the client-to-server
+   direction carries commands only.  A client MAY send commands
+   before it has read the greeting.
+
+
+6.  Server Greeting
+
+   Immediately after accepting a connection, and before any sample
+   byte, the server MUST send exactly 12 bytes:
+
+      0                   1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+     |      'R'      |      'T'      |      'L'      |      '0'      |
+     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+     |                       Tuner Type (uint32)                     |
+     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+     |                    Gain Step Count (uint32)                   |
+     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+                       Figure 2: Server Greeting
+
+   Magic
+      The ASCII bytes 0x52 0x54 0x4C 0x30 ("RTL0").  A client SHOULD
+      verify the magic and close the connection if it does not match.
+
+   Tuner Type
+      Identifies the tuner chip; see Section 6.1.
+
+   Gain Step Count
+      Number of discrete gain values the tuner offers, i.e. the length
+      of the gain table in Section 6.2.  This is also the exclusive
+      upper bound for the index in command 0x0d (Section 8.3).
+
+   The greeting carries no gain values themselves.  A client that
+   wants to present a gain list reconstructs it from the tuner type
+   and count, using a table it already knows.
+
+6.1.  Tuner Type Values
+
+           +-------+-----------------------------------------+
+           | Value | Tuner                                   |
+           +-------+-----------------------------------------+
+           |   0   | Unknown                                 |
+           |   1   | Elonics E4000                           |
+           |   2   | Fitipower FC0012                        |
+           |   3   | Fitipower FC0013                        |
+           |   4   | FCI FC2580                              |
+           |   5   | Rafael Micro R820T / R820T2             |
+           |   6   | Rafael Micro R828D                      |
+           +-------+-----------------------------------------+
+
+                      Table 1: Tuner Type Values
+
+   Values above 6 are unassigned.  A client MUST tolerate an unknown
+   value; it SHOULD then fall back to a generic gain control.
+
+6.2.  Gain Table
+
+   For tuner types 5 and 6 the gain table has 29 entries, in tenths of
+   dB, ascending:
+
+        0,   9,  14,  27,  37,  77,  87, 125, 144, 157,
+      166, 197, 207, 229, 254, 280, 297, 328, 338, 364,
+      372, 386, 402, 421, 434, 439, 445, 480, 496
+
+                  Table 2: R820T/R828D Gain Table
+
+   Gain tables for the other tuner types are out of scope for this
+   document.
+
+
+7.  Sample Stream
+
+   After the greeting the server sends I/Q samples continuously until
+   the connection closes.  The stream is unframed: it has no headers,
+   lengths, sequence numbers, or timestamps.  TCP segment and
+   application read boundaries carry no meaning; a client MUST NOT
+   assume that a read returns a whole number of I/Q pairs.
+
+   Because the greeting is 12 bytes (an even count), byte offset 12 of
+   the connection is the first I byte, and every even offset from
+   there on is an I byte.
+
+7.1.  Sample Format
+
+      +-------+-------+-------+-------+-------+-------+-----
+      |  I0   |  Q0   |  I1   |  Q1   |  I2   |  Q2   | ...
+      +-------+-------+-------+-------+-------+-------+-----
+
+                     Figure 3: Sample Stream Layout
+
+   Each byte is an unsigned 8-bit sample in offset-binary: 0 is the
+   most negative value, 255 the most positive, and the zero level lies
+   at 127.5.  A client converts a byte b to a signed value as
+
+      x = (b - 127.5) / 127.5
+
+   The sample rate is the rate most recently set by command 0x02, or
+   the server's initial rate (Section 9).  The pair rate is the sample
+   rate; the byte rate is twice the sample rate (e.g. 4.8 MB/s at
+   2.4 MS/s).
+
+7.2.  Flow Control and Sample Loss
+
+   The protocol has no flow control beyond TCP's own.  The receiver
+   produces samples at a fixed rate whether or not the client keeps up.
+
+   A server SHOULD buffer samples between the USB device and the TCP
+   socket, and when that buffer is full it SHOULD discard samples
+   rather than stall USB transfers, since a stalled device FIFO
+   overflows on the device side anyway.  A server MAY log the loss.
+
+   The client cannot detect discarded samples: the stream simply
+   continues with later samples.  A client that needs gap-free data
+   MUST read fast enough to keep the server's buffer from filling.
+
+   Samples already queued when a command arrives are still delivered.
+   A client therefore sees the effect of a command (e.g. a retune)
+   only after some delay, and SHOULD discard or tolerate a short span
+   of samples following a command.
+
+
+8.  Client Commands
+
+8.1.  Command Encoding
+
+   Every command is exactly 5 bytes:
+
+      0                   1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+     |    Command    |            Parameter (uint32) ...             |
+     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+     |      ...      |
+     +-+-+-+-+-+-+-+-+
+
+                       Figure 4: Command Encoding
+
+   Command
+      One byte, from Table 3.
+
+   Parameter
+      Four bytes in network byte order.  Whether it is read as uint32
+      or int32 is given per command in Table 3.
+
+   Commands are packed back to back with no padding.  The server reads
+   them strictly 5 bytes at a time; if it ever loses alignment, every
+   later command is misread, so a client MUST NOT send partial
+   commands.
+
+   The server sends no reply.  A server that does not implement a
+   command, or that rejects its parameter, MUST still consume all
+   5 bytes and MUST keep the connection open; it MAY log the event.
+
+8.2.  Command Table
+
+   +------+-------------------+--------+------------------------------+
+   | Cmd  | Name              | Param  | Parameter meaning            |
+   +------+-------------------+--------+------------------------------+
+   | 0x01 | Set frequency     | uint32 | Center frequency, Hz         |
+   | 0x02 | Set sample rate   | uint32 | Sample rate, Hz              |
+   | 0x03 | Set gain mode     | uint32 | 0 = automatic, else manual   |
+   | 0x04 | Set gain          | int32  | Tuner gain, tenths of dB     |
+   | 0x05 | Set freq. correct.| int32  | Crystal correction, ppm      |
+   | 0x06 | Set IF gain       | uint32 | Stage and gain, see 8.3      |
+   | 0x07 | Set test mode     | uint32 | 0 = off, else on             |
+   | 0x08 | Set AGC mode      | uint32 | 0 = off, else on             |
+   | 0x09 | Set direct samp.  | uint32 | 0 = off, 1 = I, 2 = Q branch |
+   | 0x0a | Set offset tuning | uint32 | 0 = off, else on             |
+   | 0x0b | Set RTL crystal   | uint32 | Demodulator crystal, Hz      |
+   | 0x0c | Set tuner crystal | uint32 | Tuner crystal, Hz            |
+   | 0x0d | Set gain by index | uint32 | Index into gain table        |
+   | 0x0e | Set bias tee      | uint32 | 0 = off, else on             |
+   +------+-------------------+--------+------------------------------+
+
+                          Table 3: Commands
+
+   Value 0x00 and values above 0x0e are unassigned in this document.
+   Some server forks define further commands in that range; a client
+   SHOULD NOT send them to a server it has not identified as such a
+   fork, and a server MUST ignore commands it does not know
+   (Section 8.1).
+
+8.3.  Command Semantics
+
+   0x01 Set frequency
+      Tunes the receiver so the given RF frequency appears at the
+      center (0 Hz) of the baseband stream.  The uint32 encoding caps
+      the requestable frequency at 4294967295 Hz.  Board-level
+      frequency translation, such as HF upconversion [HWSPEC]
+      Section 11.2, is applied by the server and is invisible to the
+      client.
+
+   0x02 Set sample rate
+      Sets the I/Q pair rate.  Achievable rates depend on the device
+      ([HWSPEC] Section 7.5); the server sets the nearest rate the
+      hardware supports, and the client cannot learn which.  A server
+      SHOULD also set the tuner's IF filter bandwidth to match the new
+      rate ([HWSPEC] Section 10.5).
+
+   0x03 Set gain mode
+      0 selects automatic tuner gain control; any other value selects
+      manual gain.  Manual gain takes effect with the next 0x04 or
+      0x0d command.  A client SHOULD send 0x03 with a non-zero value
+      before 0x04 or 0x0d.
+
+   0x04 Set gain
+      Sets the overall tuner gain in tenths of dB.  The value SHOULD
+      be one of the gain table entries (Section 6.2); a server given
+      another value MAY round it to the nearest supported step.
+
+   0x05 Set frequency correction
+      Corrects for crystal frequency error, in parts per million, as
+      defined in [HWSPEC] Section 7.4.  The correction applies to the
+      sample rate and the tuned frequency; a server SHOULD retune the
+      current frequency after applying it.
+
+   0x06 Set IF gain
+      The parameter packs two fields:
+
+         bits 31..16   IF gain stage number (uint16)
+         bits 15..0    gain for that stage, tenths of dB (int16)
+
+      Stage numbering and ranges are tuner-specific.
+
+   0x07 Set test mode
+      When on, the demodulator replaces samples with a counter
+      pattern ([HWSPEC] Section 7.6).  Intended for testing the
+      transport only.
+
+   0x08 Set AGC mode
+      Enables or disables the demodulator's digital AGC ([HWSPEC]
+      Section 7.6).  This is independent of the tuner gain mode set
+      by 0x03.
+
+   0x09 Set direct sampling
+      Bypasses the tuner and samples the input on the I or Q ADC
+      branch directly ([HWSPEC] Section 7.7), for HF reception on
+      boards without an upconverter.
+
+   0x0a Set offset tuning
+      Enables or disables offset tuning ([HWSPEC] Section 7.8).
+
+   0x0b Set RTL crystal, 0x0c Set tuner crystal
+      Override the nominal reference crystal frequencies the server
+      uses in its PLL and resampler arithmetic.  Intended for boards
+      with non-standard crystals; most clients should use 0x05
+      instead.
+
+   0x0d Set gain by index
+      Sets manual gain to entry n of the gain table (Section 6.2),
+      where n is the parameter.  The parameter MUST be less than the
+      Gain Step Count from the greeting; a server MUST ignore a larger
+      index.
+
+   0x0e Set bias tee
+      Switches DC power on the antenna input on or off, for powering
+      an external LNA.  A client SHOULD leave this off unless the
+      connected antenna hardware is known to require it, since DC on
+      a shorted or DC-coupled input can damage equipment.
+
+
+9.  Initial Device State
+
+   Before the first command, the receiver runs with whatever settings
+   the server was started with (typically from its command line).  A
+   client cannot query them.  A client that depends on a setting
+   SHOULD set it explicitly after connecting rather than rely on the
+   server's defaults.
+
+   Settings persist across client sessions: a server is not required
+   to restore its initial state when a client disconnects, so a new
+   client inherits the previous client's frequency, rate, and gain.
+
+
+10.  Implementation Status
+
+   This section records how the implementation in this repository
+   (github.com/dim13/rtl_tcp, built on [R82XX]) follows this
+   document, as of its date.
+
+   o  Listens on 127.0.0.1:1234 by default and serves one client at
+      a time; further clients wait in the listen backlog.
+
+   o  Always reports Tuner Type 5 (R820T) with Gain Step Count 29,
+      including on R828D hardware, since [R82XX] does not expose the
+      detected tuner type.  Both types share the gain table in
+      Section 6.2.
+
+   o  Implements commands 0x01, 0x02 (also setting the IF filter
+      bandwidth), 0x03, 0x04, 0x05 (retuning afterwards), and 0x0d.
+      All other commands are consumed, logged, and ignored.
+
+   o  Buffers 64 USB transfers of 262144 bytes (about 3.4 s at
+      2.4 MS/s) between the device and the socket, and discards new
+      samples when that buffer is full (Section 7.2).
+
+   o  Resets the device sample FIFO at the start of every session,
+      but does not restore its initial settings on disconnect.
+
+
+11.  Security Considerations
+
+   rtl_tcp has no authentication, authorization, integrity
+   protection, or encryption.  Anyone who can reach the server's port
+   can receive everything the receiver hears and can retune it.  Any
+   on-path observer can read or alter the sample stream and inject
+   commands.
+
+   A server SHOULD listen only on the loopback interface by default.
+   Exposing it on other interfaces SHOULD require an explicit
+   operator choice, and SHOULD be paired with network-level access
+   control (firewall rules, a VPN, or an authenticated tunnel such as
+   SSH port forwarding).
+
+   Because a server serves one client at a time, any client that
+   connects and stays connected denies service to all others.  A
+   server MAY bound session duration or idle time.
+
+   The bias tee command (0x0e) drives DC power onto the antenna
+   connector.  A remote client can therefore affect attached hardware
+   physically; servers exposed beyond loopback SHOULD consider
+   disabling this command.
+
+   Received radio signals can carry personal data (e.g. voice or
+   pager traffic).  Whether recording or forwarding them is lawful
+   depends on jurisdiction; this protocol does nothing to restrict
+   it.
+
+
+12.  References
+
+12.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/info/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in
+              RFC 2119 Key Words", BCP 14, RFC 8174,
+              DOI 10.17487/RFC8174, May 2017,
+              <https://www.rfc-editor.org/info/rfc8174>.
+
+   [RFC9293]  Eddy, W., Ed., "Transmission Control Protocol (TCP)",
+              STD 7, RFC 9293, DOI 10.17487/RFC9293, August 2022,
+              <https://www.rfc-editor.org/info/rfc9293>.
+
+12.2.  Informative References
+
+   [HWSPEC]   "RTL2832U + R828D SDR Receiver Hardware Specification
+              (Reverse-Engineered)", September 2026,
+              <https://github.com/dim13/r82xx/blob/master/docs/
+              hardware-spec-rfc.txt>.
+
+   [R82XX]    "r82xx: Go implementation of the RTL2832U + R820T/R828D
+              USB SDR receiver",
+              <https://github.com/dim13/r82xx>.
+
+
+Author's Address
+
+   [Author name and contact information omitted from this draft]
