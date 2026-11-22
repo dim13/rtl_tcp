@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/gousb"
@@ -62,12 +63,18 @@ func openUSB() (*usb, error) {
 }
 
 func (u *usb) ControlIn(wValue, wIndex uint16, data []byte) (int, error) {
-	return u.dev.Control(controlIn, 0, wValue, wIndex, data)
+	n, err := u.dev.Control(controlIn, 0, wValue, wIndex, data)
+	if err != nil {
+		return n, fmt.Errorf("control in %#04x/%#04x: %w", wValue, wIndex, err)
+	}
+	return n, nil
 }
 
 func (u *usb) ControlOut(wValue, wIndex uint16, data []byte) error {
-	_, err := u.dev.Control(controlOut, 0, wValue, wIndex, data)
-	return err
+	if _, err := u.dev.Control(controlOut, 0, wValue, wIndex, data); err != nil {
+		return fmt.Errorf("control out %#04x/%#04x: %w", wValue, wIndex, err)
+	}
+	return nil
 }
 
 func (u *usb) BulkIn(data []byte) (int, error) {
